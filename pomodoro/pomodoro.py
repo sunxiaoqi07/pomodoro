@@ -1,6 +1,8 @@
 """
 番茄钟 2.0 — 桌面番茄钟计时器
 功能：番茄工作法计时、任务管理、每日统计、自定义设置、键盘快捷键
+
+工作流程：25 分钟专注 → 5 分钟短休息（4 轮后切换为 15 分钟长休息）
 """
 
 import tkinter as tk
@@ -10,31 +12,34 @@ import time
 import winsound
 from datetime import date
 
-# ─── File Paths ──────────────────────────────────────────
+# ─── 文件路径 ─────────────────────────────────────────────
+# 数据文件与脚本同目录，便于便携使用（如放到 U 盘）
 DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(DIR, "config.json")
 STATS_PATH = os.path.join(DIR, "stats.json")
 
-# ─── Color Palette (Catppuccin Mocha) ────────────────────
-BG          = "#1e1e2e"
-SURFACE     = "#181825"
-FG          = "#cdd6f4"
-SUBTLE      = "#a6adc8"
-DIM         = "#6c7086"
-WORK_CLR    = "#f38ba8"
-BREAK_CLR   = "#a6e3a1"
-LONG_CLR    = "#89b4fa"
-ACCENT      = "#89b4fa"
-BTN_BG      = "#313244"
-BTN_HOVER   = "#45475a"
-BTN_ACTIVE  = "#585b70"
-TRACK       = "#313244"
-SUCCESS     = "#a6e3a1"
-WARN        = "#f9e2af"
-SEPARATOR   = "#313244"
+# ─── 颜色方案（Catppuccin Mocha 主题）─────────────────────
+# 柔和的深色系配色，减少长时间使用时的视觉疲劳
+BG          = "#1e1e2e"   # 主背景
+SURFACE     = "#181825"   # 次级背景（稍深，用于底部统计栏等）
+FG          = "#cdd6f4"   # 主文字
+SUBTLE      = "#a6adc8"   # 次要文字
+DIM         = "#6c7086"   # 淡化文字（装饰性信息）
+WORK_CLR    = "#f38ba8"   # 工作阶段主色（粉红）
+BREAK_CLR   = "#a6e3a1"   # 短休息主色（绿色）
+LONG_CLR    = "#89b4fa"   # 长休息主色（蓝色）
+ACCENT      = "#89b4fa"   # 强调色
+BTN_BG      = "#313244"   # 按钮背景
+BTN_HOVER   = "#45475a"   # 按钮悬浮
+BTN_ACTIVE  = "#585b70"   # 按钮按下
+TRACK       = "#313244"   # 计时器环形轨道
+SUCCESS     = "#a6e3a1"   # 成功/完成色（任务勾选）
+WARN        = "#f9e2af"   # 警告色（删除按钮悬浮）
+SEPARATOR   = "#313244"   # 分割线
 SURFACE2    = "#585b70"
 
-# ─── Defaults ────────────────────────────────────────────
+# ─── 默认配置 ────────────────────────────────────────────
+# 新用户/数据损坏时回退到这些值，保证应用始终可用
 DEFAULT_CONFIG = {
     "work_min": 25,
     "short_break_min": 5,
@@ -44,6 +49,8 @@ DEFAULT_CONFIG = {
 }
 DEFAULT_STATS = {"total_completed": 0, "total_focus_seconds": 0, "days": {}}
 
+# 三阶段定义：工作时、短休息、长休息
+# key 指向 config.json 中对应的时长字段
 PHASES = {
     "WORK":        {"label": "🍅 工作中",   "key": "work_min",        "color": WORK_CLR},
     "SHORT_BREAK": {"label": "☕ 短休息",   "key": "short_break_min", "color": BREAK_CLR},
@@ -54,14 +61,17 @@ PHASES = {
 # ─── Scrollable Frame ────────────────────────────────────
 
 class ScrollableFrame(tk.Frame):
-    """A frame whose contents can be scrolled."""
+    """可滚动的容器 —— 用 Canvas + Scrollbar 实现，而非 ttk.Treeview。
+    选择 tkinter Canvas 而非 ttk.Treeview，是因为我们需要完全控制子组件的样式，
+    Treeview 的自定义颜色支持有限。
+    """
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
         self.scrollbar = tk.Scrollbar(self, orient="vertical",
                                        bg=BTN_BG, troughcolor=BG, activebackground=BTN_HOVER)
-        self.inner = tk.Frame(self.canvas, bg=BG)
+        self.inner = tk.Frame(self.canvas, bg=BG)  # 实际内容的容器
         self.inner.bind("<Configure>", self._on_inner_configure)
         self._inner_win = self.canvas.create_window(
             (0, 0), window=self.inner, anchor="nw", tags="inner")
@@ -71,15 +81,18 @@ class ScrollableFrame(tk.Frame):
         self._bind_wheel()
 
     def _on_inner_configure(self, event):
+        # 当内部 frame 大小变化时更新 Canvas 的滚动区域，并使 inner 宽度跟随 canvas 宽度
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         self.canvas.itemconfig("inner", width=self.canvas.winfo_width())
 
     def _bind_wheel(self):
+        # 使用 bind_all 全局捕获滚轮事件（Canvas 本身不总是能获取焦点）
         def on_wheel(event):
             self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
         self.canvas.bind_all("<MouseWheel>", on_wheel, add="+")
 
     def destroy(self):
+        # 清理全局绑定，避免销毁后滚轮事件仍被捕获导致异常
         self.canvas.unbind_all("<MouseWheel>")
         super().destroy()
 
@@ -93,27 +106,32 @@ class PomodoroApp:
         self.root.title("番茄钟")
         self.root.geometry("420x700")
         self.root.configure(bg=BG)
-        self.root.resizable(False, False)
+        self.root.resizable(False, False)  # 固定窗口大小，避免布局错乱
         self.center_window()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Load data
+        # ── 加载持久化数据 ──────────────────────────────
+        # config.json 和 stats.json 读写都在主线程完成，
+        # 因为文件小且操作不频繁，不需要异步。
         self.config = self.load_config()
         self.stats = self.load_stats()
         self.today = date.today().isoformat()
         self._ensure_today()
 
-        # Timer state
+        # ── 计时器状态机 ────────────────────────────────
+        # phase:   WORK → SHORT_BREAK (×4) → LONG_BREAK → WORK（循环）
+        # state:   IDLE → RUNNING → PAUSED（用户暂停）→ RUNNING / IDLE
+        # session_idx: 当前轮次（0-3），每 4 轮触发一次长休息
         self.phase = "WORK"
         self.state = "IDLE"          # IDLE | RUNNING | PAUSED
         self.completed = 0
         self.session_idx = 0
         self.total = self._phase_secs("WORK")
         self.remaining = float(self.total)
-        self._end_time = 0.0
-        self._job = None
-        self._flash_job = None
-        self._settings_win = None
+        self._end_time = 0.0          # 用于 RUNNING 状态下的倒计时基准
+        self._job = None              # tkinter after() 的定时器句柄
+        self._flash_job = None        # 窗口闪烁的定时器句柄
+        self._settings_win = None     # 设置窗口引用（单例）
 
         # Tasks
         self.tasks = self._load_today_tasks()
@@ -122,6 +140,7 @@ class PomodoroApp:
         # Build & go
         self.build_ui()
         self.sync_ui()
+        # 全局键盘快捷键：无需鼠标即可控制计时器
         self.root.bind("<space>", lambda e: self.toggle_start())
         self.root.bind("<r>", lambda e: self.reset())
         self.root.bind("<s>", lambda e: self.skip())
@@ -137,7 +156,9 @@ class PomodoroApp:
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
-    # ── Persistence ───────────────────────────────────────
+    # ── 持久化：JSON 文件读写 ─────────────────────────
+    # 使用 JSON 而非数据库，因为数据量极小且需要用户可直接编辑。
+    # 加载失败时静默回退到默认值，不弹错误弹窗干扰用户。
 
     def load_config(self):
         try:
@@ -392,15 +413,21 @@ class PomodoroApp:
         self.focus_label.config(text=focus)
         self.total_label.config(text=f"累计 {self.stats['total_completed']} 个")
 
-    # ── Timer ─────────────────────────────────────────────
+    # ── 计时器核心逻辑 ─────────────────────────────────────
+    # 不使用 time.sleep() 循环，而是用 tkinter.after() 实现非阻塞定时，
+    # 这样 UI 事件循环不会被阻塞，按钮和动画保持响应。
+    # _end_time 记录绝对结束时间戳，即使 _tick 延迟也能准确定时。
 
     def toggle_start(self):
+        """开始/暂停切换 —— 空格键绑定的核心操作"""
         if self.state in ("IDLE", "PAUSED"):
+            # IDLE → RUNNING 或 PAUSED → RUNNING
             self.state = "RUNNING"
             self._end_time = time.time() + self.remaining
             self.start_btn.config(text="⏸  暂停")
             self._tick()
         elif self.state == "RUNNING":
+            # RUNNING → PAUSED
             self.state = "PAUSED"
             self.start_btn.config(text="▶  继续")
             if self._job:
@@ -437,10 +464,12 @@ class PomodoroApp:
             self._job = None
 
     def _on_time_up(self, skip=False):
+        """计时结束或被跳过时的处理：统计、切换阶段、通知"""
         self._job = None
         self.state = "IDLE"
         self.start_btn.config(text="▶  开始")
 
+        # 如果是工作时间结束，记录完成数和专注时长
         if self.phase == "WORK":
             self.completed += 1
             self.session_idx += 1
@@ -452,6 +481,7 @@ class PomodoroApp:
             self.stats["total_focus_seconds"] += work_s
             self.save_stats()
 
+        # 阶段自动切换：4 轮工作后长休息，否则短休息；休息完切回工作
         if self.phase == "WORK":
             self.phase = "LONG_BREAK" if self.session_idx >= 4 else "SHORT_BREAK"
             if self.session_idx >= 4:
@@ -466,10 +496,14 @@ class PomodoroApp:
         if not skip:
             self._notify()
 
+        # 自动继续：延迟 1 秒后开始下一个阶段，给用户一点反应时间
         if self.config.get("auto_start") and not skip:
             self.root.after(1000, self.toggle_start)
 
-    # ── Tasks ─────────────────────────────────────────────
+    # ── 任务管理 ─────────────────────────────────────────
+    # 任务数据存储在 stats.json 的当天记录中，随统计一起持久化。
+    # 每条任务格式：{"text": str, "done": bool}
+    # 使用动态刷新（refresh_tasks）而非逐个更新，减少状态同步的复杂度。
 
     def _entry_focus_in(self, event=None):
         if self.task_entry.get() == "添加新任务...":
@@ -546,7 +580,9 @@ class PomodoroApp:
         total = len(self.tasks)
         self.task_count.config(text=f"{done}/{total}" if total else "0/0")
 
-    # ── Settings ──────────────────────────────────────────
+    # ── 设置窗口 ─────────────────────────────────────────
+    # 用 Toplevel 窗口作为设置面板，通过 grab_set() 模态化，
+    # 避免用户同时操作主窗口和设置导致状态不一致。
 
     def _close_settings(self):
         if self._settings_win and self._settings_win.winfo_exists():
@@ -658,7 +694,9 @@ class PomodoroApp:
         self.root.attributes("-topmost", on)
         self.pin_btn.config(fg=ACCENT if on else DIM)
 
-    # ── Notifications ─────────────────────────────────────
+    # ── 通知系统 ─────────────────────────────────────────
+    # 三种通知方式组合：蜂鸣声（winsound）、任务栏闪烁、弹窗提示。
+    # 即使声音被禁用，闪烁和弹窗仍会生效，确保用户不会错过切换。
 
     def _notify(self):
         if self.config.get("sound_enabled", True):
