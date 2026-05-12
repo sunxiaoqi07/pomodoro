@@ -1,0 +1,10 @@
+{
+  "total_completed": 1,
+  "total_focus_seconds": 1500,
+  "days": {
+    "2026-05-12": {
+      "completed": 1,
+      "focus_seconds": 1500
+    }
+  }
+}
